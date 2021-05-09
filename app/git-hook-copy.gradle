@@ -1,0 +1,94 @@
+/**
+ * 本地项目 git hook 自动拷贝脚本
+ *
+ * apply from: 'git-hook-copy.gradle'
+ */
+
+/**
+ * 来个紧急开关，防止吐槽
+ */
+def forbid = false
+
+project.afterEvaluate {
+    if (forbid) {
+        preBuild.dependsOn 'resetGitHookConfig'
+    } else {
+        preBuild.dependsOn 'prepareGitHookConfig'
+    }
+}
+
+/**
+ * 还是覆盖吧，也不大，不然以后修改了check config规则还得通知大家更新
+ * 而且 task 自己有 UPDATE 机制，不慌
+ */
+task prepareGitHookConfig(type: Copy) {
+    def configFile = getConfigFile()
+    def hookDir = getGitHookDir()
+    enabled = (configFile != null && hookDir != null)
+
+    from configFile
+    into hookDir
+}
+
+task resetGitHookConfig {
+    doFirst {
+        File file = getGitHookFile('commit-msg')
+        if (file != null) {
+            file.delete()
+        }
+
+        file = getGitHookFile('pre-commit')
+        if (file != null) {
+            file.delete()
+        }
+    }
+}
+
+def getGitHookFile(fileName) {
+    def dirPath = getGitHookDir()
+    if (dirPath != null && dirPath.length() > 0) {
+        def file = new File(dirPath, fileName)
+        if (file.exists()) {
+            return file
+        }
+    }
+    return null
+}
+
+def getConfigFile() {
+    def configFiles = []
+
+    File commitMsgFile = new File(project.rootDir, "codestyle/commit-msg")
+    if (commitMsgFile.exists()) {
+        configFiles.add(commitMsgFile.absolutePath)
+    }
+
+    File preCommitFile = new File(project.rootDir, "codestyle/pre-commit")
+    if (preCommitFile.exists()) {
+        configFiles.add(preCommitFile.absolutePath)
+    }
+
+    return configFiles
+}
+
+def getGitHookDir() {
+    File gitDir = new File(project.rootDir, ".git")
+    if (gitDir.exists() && gitDir.isFile()) { // 使用的是worktree方式
+        String gitDirConf = gitDir.readLines().get(0)
+        String realGitDir = gitDirConf.substring("gitdir: ".length())
+        println("Real .git directory in ${realGitDir}")
+        File gitHookDir = new File(realGitDir, "hooks")
+        if (!gitHookDir) {
+            println("Please ensure ${gitHookDir.absolutePath} is exist!!!")
+            return null
+        }
+        return gitHookDir.absolutePath
+    }
+    File gitHookDir = new File(project.rootDir, ".git/hooks/")
+    if (!gitHookDir.exists()) {
+        println("Your project can't find .git directory in the ${project.rootDir.absolutePath}," +
+                " please ensure it have been tracked by git VCS!")
+        return null
+    }
+    return gitHookDir.absolutePath
+}

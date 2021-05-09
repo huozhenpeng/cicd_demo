@@ -1,0 +1,222 @@
+/**
+ * 支持 git 增量 checkstyle 检查的脚本
+ *
+ * apply from: 'codestyle.gradle'
+ */
+
+import org.xml.sax.helpers.XMLReaderFactory
+import java.util.regex.Matcher
+import java.util.regex.Pattern
+
+apply plugin: 'checkstyle'
+apply from: './git-hook-copy.gradle'
+plugins {
+    id 'com.android.application'
+    id 'kotlin-android'
+}
+
+
+def checkStyleFile = rootProject.file("codestyle/wps_codestyle_checks.xml")
+def reportHtmlFile = rootProject.file(project.rootProject.buildDir.path + "/wps-reports/checkstyle-result.html")
+
+checkstyle {
+    toolVersion "8.12"
+    configFile checkStyleFile
+    showViolations = true
+    ignoreFailures = true
+}
+
+tasks.withType(Checkstyle) {
+    classpath = files()
+    source "${project.rootDir}"
+    exclude '**/gen/**'
+    exclude '**/build/**'
+    exclude '**/androidTest/**'
+    exclude "**/test/**"
+    exclude "**/.idea/**"
+    exclude "**/.gradle/**"
+    exclude "**/gradleBuild/**"
+    exclude "**/captures/**"
+    exclude "**/libs/**"
+
+    reports {
+        html {
+            enabled true
+            destination reportHtmlFile
+        }
+
+        xml {
+            enabled false
+        }
+    }
+}
+
+task checkstyleAll(type: Checkstyle) {
+    doFirst {
+        deleteReportFiles(reportHtmlFile)
+    }
+}
+
+task checkstyleVcsChanged(type: Checkstyle) {
+    def changedFiles = getFilterFiles('dr')
+    if (changedFiles.isEmpty()) {
+        source = files()
+        enabled = false
+        deleteReportFiles(reportHtmlFile)
+        println("git status no changed, checkstyleChanged disable!")
+    }
+    include changedFiles
+
+    doFirst {
+        deleteReportFiles(reportHtmlFile)
+    }
+
+    doLast {
+        if (!verifyResultValid(reportHtmlFile)) {
+            def ret = deleteReportFiles(reportHtmlFile)
+            println "verify result is invalid, delete report($ret)."
+        }
+    }
+}
+
+task checkstyleVcsNew(type: Checkstyle) {
+    def changedFiles = getFilterFiles('A')
+    if (changedFiles.isEmpty()) {
+        source = files()
+        enabled = false
+        deleteReportFiles(reportHtmlFile)
+        println("git status no new file to add, checkstyleVcsNew disable!")
+    }
+    include changedFiles
+
+    doFirst {
+        deleteReportFiles(reportHtmlFile)
+    }
+
+    doLast {
+        if (!verifyResultValid(reportHtmlFile)) {
+            def ret = deleteReportFiles(reportHtmlFile)
+            println "verify result is invalid, delete report($ret)."
+        }
+    }
+}
+
+def isGitlibCi() {
+    return "gitlibCI" == System.getenv("BUILD_TAG")
+}
+
+/**
+ * codestyle task自身有bug，有时候扫描到多个文件，0错误时也会生成报表文件
+ * 所以人肉解析一把html，匹配一次error count，如果是0说明真的没错误
+ */
+def verifyResultValid(File htmlFile) {
+    def valid = true
+    def parser = null
+    def xml = null
+    try {
+        if (htmlFile != null && htmlFile.exists()) {
+            parser = new XmlParser(XMLReaderFactory.createXMLReader("org.ccil.cowan.tagsoup.Parser"))
+            xml = parser.parse(htmlFile)
+            def firstTable = xml.'**'.table.findAll {
+                (it.attributes().get("class") == "log")
+            }[0]
+            def trAArray = firstTable.tr.find {
+                it.attributes().get("class") == "a"
+            }
+            def count = trAArray.td[1].text()
+            valid = !(count == "0")
+        }
+    } catch(Throwable e) {
+        println("verifyResultValid exception.")
+    } finally {
+        parser = null
+        xml = null
+    }
+    return valid
+}
+
+def deleteReportFiles(File htmlFile) {
+    if (htmlFile != null && htmlFile.exists()) {
+        return htmlFile.delete()
+    }
+    return false
+}
+
+def getFilterFiles(diffFilter) {
+    def files = getChangedFiles(diffFilter)
+    if (files.isEmpty()) {
+        return files
+    }
+
+    List<String> filterFiles = new ArrayList<>()
+    for (file in files) {
+        if (file.endsWith(".java") || file.endsWith(".xml")) {
+            filterFiles.add(file)
+        }
+    }
+
+    //println("\nDiff need checkstyle filter "+diffFilter+"->"+filterFiles)
+    return filterFiles
+}
+
+def getChangedFiles(diffFilter) {
+    def targetBranch = project.getProperties().get("targetBranch")
+    def sourceBranch = project.getProperties().get("sourceBranch")
+    return getGitCmdFiles(targetBranch, sourceBranch, diffFilter)
+}
+
+def getGitCmdFiles(targetBranch, sourceBranch, diffFilter) {
+    println("Target branch: $targetBranch")
+    println("Source branch: $sourceBranch")
+
+    List<String> files = new ArrayList<>()
+    if (targetBranch == null || sourceBranch == null) {
+        return files
+    }
+
+    def systemOutStream = new ByteArrayOutputStream()
+    def command = "git diff --name-status --diff-filter=$diffFilter $targetBranch...$sourceBranch"
+    command.execute().waitForProcessOutput(systemOutStream, System.err)
+    def allFiles = systemOutStream.toString().trim().split('\n')
+    systemOutStream.close()
+
+    Pattern statusPattern = Pattern.compile("(\\w)\\t+(.+)")
+    for (file in allFiles) {
+        Matcher matcher = statusPattern.matcher(file)
+        if (matcher.find()) {
+            files.add(matcher.group(2))
+        }
+    }
+    //println("diff branch-------- "+diffFilter+"->"+files)
+
+    if (!isGitlibCi()) {
+        def systemOutStreamLocal = new ByteArrayOutputStream()
+        def commandLocal = "git status -s"
+        commandLocal.execute().waitForProcessOutput(systemOutStreamLocal, System.err)
+        def allLocalFiles = systemOutStreamLocal.toString().trim().split('\n')
+        systemOutStreamLocal.close()
+        Pattern statusPatternLocal = Pattern.compile("\\s?([\\?{2}MA])\\s+(.+)")
+        for (file in allLocalFiles) {
+            Matcher matcher = statusPatternLocal.matcher(file)
+            if (matcher.find()) {
+                def unTrackFile = matcher.group(2)
+                if (!files.contains(unTrackFile)) {
+                    files.add(unTrackFile)
+                }
+            }
+        }
+    }
+    files
+}
+
+buildscript {
+    repositories {
+        maven { url "https://maven.aliyun.com/repository/public/" }
+        maven { url "https://maven.aliyun.com/repository/google/" }
+        google()
+        jcenter()
+    }
+    dependencies {
+        classpath 'org.ccil.cowan.tagsoup:tagsoup:1.2.1'
+    }
+}
